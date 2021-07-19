@@ -3,12 +3,29 @@
 # Author: Vadim Kantorov
 # Source: https://github.com/vadimkantorov/wemosetup
 
-# Vadim's python script gives the most consistent results for WeMo devices on my
-# home network.
+# Vadim's python script using the discover command gives the most consistent
+# results for WeMo devices on my home network using a MacBook running OS X 11.4.
+#
+# This script out perfoms nmap, arp and various python and bash scripts. With
+# nmap and arp, only ~1/2 of my WeMo devices are found. This script finds all
+# but one, even when this device has not lost connection to the network.
+#
+# My network has two switches and two Wi-Fi access points directly connected
+# to an AT&T gateway.
+#
+# The script requires:
+#   python3 be installed using python.org package installation
+#   pip3 - I forgot how this was installed, perahps homebrew ???
+#   pip3 install requests
 #
 # During the setup process, every WeMo switch has the same IP Address 10.22.22.1
 # Vadim's script was developed to setup a WeMo device from a linux command line.
-# I use the WeMo app to setup new, or after reboot or after factory reset.
+#
+# I use the WeMo app and not this script to setup new, or to setup after reboot
+# or after factory reset.
+#
+# My primary use is to find WeMos that lost connection and are not responding
+# to the discover command.
 #
 # So, I am making changes to the script to meet my needs.
 #
@@ -16,20 +33,22 @@
 #   - ??? I really like the coding style, but I don't really understand
 #     everything
 #     so I am going to add more comments
-#   - ??? Add MAC Address to Discover
 #   - ??? Confirm all commands work. I don't have a WeMo bridge
 #     - ??? without a bridge, bridge commands error out. Fix so appropriate
 #       error message is provided
-#   - ??? Do not error out if no bridge is present
+#   - add 2nd discover which uses 10.10... for bridge
 # Completed:
+#   - Add data command: returns MAC address, friendly name, model, hw version,
+#     serial number
 #   - Add a counter of devices found during discover
-#   - Add more informatioon to help and usage
+#   - Add more information to help and usage
 #     - I am guessing at the function of add, remove, get and reset, since I
 #       do not have a WeMo bridge
 #   - Discover and Toggle commands work
 #   - Shortened bridge commands. For example, shortened getenddevices to get
-#   - Changed from WeMo device setup IP Address 10.22.22.1 to my home's LAN
-#     broadcast IP address = 192.168.1.255
+#   - Changed discover to bridge command. The bridge command uses the default
+#     WeMo device setup IP Address: 10.22.22.1
+#   - Discover uses my home LAN's broadcast IP address = 192.168.1.255
 #   - Replaced tabs with 4 spaces, because I use nano editor, and it switches
 #     tabs to spaces on cut & paste
 
@@ -46,6 +65,9 @@ import socket
 import http.client
 import urllib.request
 import xml.dom.minidom
+import csv
+import requests
+
 
 class SsdpDevice:
     def __init__(self, setup_xml_url, timeout = 5):
@@ -151,14 +173,118 @@ class WemoDevice(SsdpDevice):
     def prettify_device_state(self, state):
         return 'on' if state == 1 else 'off' if state == 0 else f'unknown ({state})'
 
-def discover():
+def data (host, port):
     print()
-    print('Discovery of WeMo devices')
+    print('Data for WeMo device:')
     print()
 
-    # The original line is commented out below. I believe my broadcast IP address is 192.168.1.255
-    # host_ports = set(WemoDevice.discover_devices() + [('10.22.22.1', str(port)) for port in range(49151, 49156)])
+    # url for setup.xml API
+    # This url can also be run from a linux curl command or from a browser:
+    #   http://<ip-address>:<port>/setup.xml
+    url = "http://" + host + ":" + str(port) + "/setup.xml"
+
+    # creating HTTP response object from given url
+    resp = requests.get(url)
+
+    # saving the xml file
+    with open('wemo.xml', 'wb') as f:
+        f.write(resp.content)
+
+    # Open XML document using minidom parser
+    DOMTree = xml.dom.minidom.parse("wemo.xml")
+    device = DOMTree.documentElement
+
+    friendlyName = device.getElementsByTagName("friendlyName")[0]
+    print (" - Friendly Name: %s" % friendlyName.childNodes[0].data)
+
+    modelName = device.getElementsByTagName("modelName")[0]
+    print (" - Model Name:    %s" % modelName.childNodes[0].data)
+
+    hwVersion = device.getElementsByTagName("hwVersion")[0]
+    print (" - HW Version:    %s" % hwVersion.childNodes[0].data)
+
+    serialNumber = device.getElementsByTagName("serialNumber")[0]
+    print (" - Serial Number: %s" % serialNumber.childNodes[0].data)
+
+    macAddress = device.getElementsByTagName("macAddress")[0]
+    print (" - MAC Address:   %s" % macAddress.childNodes[0].data)
+
+    hkSetupCode = device.getElementsByTagName("hkSetupCode")[0]
+    print (" - Setup Code:    %s" % hkSetupCode.childNodes[0].data)
+
+    # <UPC>, <brightness> and <binaryState> are not meaningful
+
+    print()
+
+
+def discover():
+    print()
+    print('Discovered WeMo devices:')
+    print()
+
+    firstRogue = True
+    # My broadcast IP address is 192.168.1.255
+    # host_ports is a list of IP address and WeMo Port
     host_ports = set(WemoDevice.discover_devices() + [('192.168.1.255', str(port)) for port in range(49151, 49156)])
+
+    # print(host_ports)
+
+    discovered_devices = []
+    for host, port in sorted(host_ports):
+        try:
+            discovered_devices.append(WemoDevice(host, port))
+        except urllib.error.URLError:
+            if "192.168.1" != str(host)[0:9]:
+                if firstRogue:
+                    print(' *** WARNING: There is a Rogue DHCP Server on your network ')
+                    print('''
+On a MacBook, open two terminals windows.
+In 1st Terminal run this command:
+    $ sudo tcpdump -nelt udp port 68 | grep -i "boot.*reply"
+    Password: <your-macbook-password>
+
+    Once the second window is opened and its command is run something like the following should appear in Terminal 1
+        tcpdump: data link type PKTAP
+        tcpdump: verbose output suppressed, use -v or -vv for full protocol decode
+        listening on pktap, link-type PKTAP (Apple DLT_PKTAP), capture size 262144 bytes
+        58:19:f8:bf:fb:a0 > ff:ff:ff:ff:ff:ff, ethertype IPv4 (0x0800), length 459: 192.168.1.254.67 > 255.255.255.255.68: BOOTP/DHCP, Reply, length 417
+        b8:27:eg:82:5d:26 > ff:ff:ff:ff:ff:ff, ethertype IPv4 (0x0800), length 342: 172.24.220.1.67 > 255.255.255.255.68: BOOTP/DHCP, Reply, length 300
+    My DHCP server should be 192.16.1.64-253. So, the last one is rogue and serving 172.24.220.xxx
+
+In 2nd Terminal, run the following command:
+    $ sudo nmap --script broadcast-dhcp-discover -e en0
+
+From the 1st terminal copy the first 2 or 3 octets from the MAC Address (b8:27, or b8:27:eg)
+    Open a browser, and enter
+        https://www.wireshark.org/tools/oui-lookup.html
+    Put the 2 - 3 octets and press find
+
+    In the above case, b8:27 matches a raspberry pi. So, one of my raspberry pis is serving DHCP
+''')
+                firstRogue = False
+
+            if "192.168.1.255" != str(host):
+                print(' -  ' + str(host))
+            continue
+
+    print('Discovered:' if discovered_devices else 'No devices discovered')
+    n = 0
+    for device in discovered_devices:
+        print(' - ' + str(device))
+        n += 1
+
+    print('Devices Found = ' + str(n))
+    print()
+    return discovered_devices
+
+def bridge():
+    print()
+    print('Discovered WeMo devices, perhaps on a bridge:')
+    print()
+
+    # 10.22.22.1 is the default IP Address when a WeMo device is in setup mode
+    # host_ports is a list of IP address and WeMo Port
+    host_ports = set(WemoDevice.discover_devices() + [('10.22.22.1', str(port)) for port in range(49151, 49156)])
     discovered_devices = []
     for host, port in sorted(host_ports):
         try:
@@ -196,12 +322,12 @@ def connecthomenetwork(host, port, ssid, password, timeout = 10):
 
     network_status = device.soap('WiFiSetup', 'GetNetworkStatus', 'NetworkStatus')
     close_status = device.soap('WiFiSetup', 'CloseSetup', 'status')
-    print(f'Device failed to connect to the network: ({connect_status}, {network_status}). Try again.' if network_status not in ['1', '3'] or close_status != 'success' else f'Device {device} connected to network "{ssid$
+    print(f'Device failed to connect to the network: ({connect_status}, {network_status}). Try again.' if network_status not in ['1', '3'] or close_status != 'success' else f'Device {device} connected to network "{ssid}"')
 
 def getenddevices(device = None, host = None, port = None, list_type = 'PAIRED_LIST'):
     device = device or WemoDevice(host, port)
     end_devices_decoded = device.soap('bridge', 'GetEndDevices', 'DeviceLists', args = {'DevUDN' : device.udn, 'ReqListType' : list_type}).replace('&lt;', '<').replace('&gt;', '>').replace('&quot;', '"')
-    end_devices = {str(elem.getElementsByTagName('DeviceID')[0].firstChild.data) : {'' : None, '1' : 1, '0' : 0}[elem.getElementsByTagName('CurrentState')[0].firstChild.data.split(',')[0]] for elem in xml.dom.minidom.p$
+    end_devices = {str(elem.getElementsByTagName('DeviceID')[0].firstChild.data) : {'' : None, '1' : 1, '0' : 0}[elem.getElementsByTagName('CurrentState')[0].firstChild.data.split(',')[0]] for elem in xml.dom.minidom.parseString($
     if host != None and port != None:
         print(f'End devices of {device}:' if end_devices else 'No end devices of {device} were found')
         for device_id, state in sorted(end_devices.items()):
@@ -249,9 +375,9 @@ def toggle(host, port):
     if 'Bridge' in device.friendly_name:
         bulbs = getenddevices(device, list_type = 'PAIRED_LIST')
         new_binary_state = 1 - int(bulbs.items()[0][1] or 0)
-        device.soap('bridge', 'SetDeviceStatus', args = {'DeviceStatusList' :
+       device.soap('bridge', 'SetDeviceStatus', args = {'DeviceStatusList' :
             ''.join(['<?xml version="1.0" encoding="utf-8"?>'] +
-            ['''<DeviceStatus><IsGroupAction>NO</IsGroupAction><DeviceID available="YES">{}</DeviceID><CapabilityID>{}</CapabilityID><CapabilityValue>{}</CapabilityValue></DeviceStatus>'''.format(bulb_device_id, 10006,$
+            ['''<DeviceStatus><IsGroupAction>NO</IsGroupAction><DeviceID available="YES">{}</DeviceID><CapabilityID>{}</CapabilityID><CapabilityValue>{}</CapabilityValue></DeviceStatus>'''.format(bulb_device_id, 10006, new_binary$
             ).replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
             })
     else:
@@ -265,13 +391,13 @@ def ifttt(host, port, device_id):
     parse_xml = lambda resp, fields: [doc.getElementsByTagName(field)[0].firstChild.data for doc in [xml.dom.minidom.parseString(resp)] for field in fields]
     error = lambda status: f'{device} failed to enable IFTTT: status code {status}'
 
-    home_id, private_key, remote_access_status = parse_xml(device.soap('remoteaccess', 'RemoteAccess', args = {'DeviceId' : device_id, 'DeviceName' : device_id, 'dst' : 0, 'HomeId' : '', 'MacAddr' : '', 'pluginprivateK$
+    home_id, private_key, remote_access_status = parse_xml(device.soap('remoteaccess', 'RemoteAccess', args = {'DeviceId' : device_id, 'DeviceName' : device_id, 'dst' : 0, 'HomeId' : '', 'MacAddr' : '', 'pluginprivateKey' : '', '$
     if remote_access_status != 'S':
         print(error(remote_access_status))
         return
 
     auth_code = device.generate_auth_code(device_id, private_key)
-    activation_code, generate_pin_status = parse_xml(urllib.request.urlopen(urllib.request.Request(f'https://api.xbcs.net:8443/apis/http/plugin/generatePin/{home_id}/IFTTT', headers = {'Content-Type' : 'application/xml$
+    activation_code, generate_pin_status = parse_xml(urllib.request.urlopen(urllib.request.Request(f'https://api.xbcs.net:8443/apis/http/plugin/generatePin/{home_id}/IFTTT', headers = {'Content-Type' : 'application/xml', 'Authori$
     if generate_pin_status != '0':
         print(error(generate_pin_status))
         return
@@ -288,9 +414,10 @@ if __name__ == '__main__':
     # help text should be limited to 80characters
     if ("--help" in sys.argv) or ("--h" in sys.argv) or ("-h" in sys.argv) or (len(sys.argv) == 1):
      print('''\033[1mNAME\033[0m
-     wemosetup -- Toggles WeMo devices. Lists WeMos on network. Adds, removes,
-       lists or resets WeMo devices on a WeMo bridge. Pairs with
-       IFTTT.
+     wemosetup -- wemosetup can be used to setup a new WeMo device, or it can be
+       used to examine or control WeMo devices on a home network or on a WeMo
+       bridge. WeMo devices can be toggled on or off. Lists WeMos on network. Adds,
+       removes, lists or resets WeMo devices on a WeMo bridge. Pairs with IFTTT.
 
 \033[1mSYNOPSIS\033[0m
      python3 wemosetup.py command [-options]
@@ -299,48 +426,61 @@ if __name__ == '__main__':
      WeMo devices include smart plugs, light switches, dimmers and 3-way switches
      on 802.11n Wi-Fi.
 
+     When in setup mode, the default IP Address for the device is 10.22.22.1.
+
      As of JUL2021, WeMos have trouble staying connecting to a home network. Tools
      like this simplify finding WeMo devices that have lost connection.
 
-     The following commands are available. All options listed for a command are
-     required:
+     The following WeMo bridge and/or setup commands are available. All options
+     listed for a command are required:
 
-     add --ip <ip> --port <p>
+       add --ip <ip> --port <p>
           Add a device to a WeMo bridge
 
-     connect --ip <ip> --port <p> --ssid <wifi-ssid> --password <pswd>
+       bridge
+          List the friendly name, IP address and port of all WeMo devices on
+          a WeMo Bridge or home network
+
+       connect --ip <ip> --port <p> --ssid <wifi-ssid> --password <pswd>
           Connect a WeMo device to the home Wi-Fi network
 
-     discover
+       get --ip <ip> --port <p>
+          List devices on WeMo bridge
+
+       remove --ip <ip> --port <p>
+          Remove devices from a WeMo bridge
+
+       reset --ip <ip> --port <p>
+          Reset WeMos (remove  and add all devices from WeMo bridge
+
+     The following WeMo general purpose commands are available. A bridge is not
+     required. All options listed for a command are required:
+
+       data --ip <ip> --port <p>
+          Lists all of the data for a WeMo's IP Address and Port found through
+          discover command
+
+       discover
           List the friendly name, IP address and port of all WeMo devices on
           home network
 
-     get --ip <ip> --port <p>
-       List devices on WeMo bridge
-
-     ifttt --ip <ip> --port <p> --imei <imei>
+       ifttt --ip <ip> --port <p> --imei <imei>
           Pair with IFTTT (will ask to follow a web link and then execute
           JavaScript from DevTools console), imei may be an arbitrary number
 
-     remove --ip <ip> --port <p>
-          Remove devices from a WeMo bridge
-
-     reset --ip <ip> --port <p>
-          Reset WeMos (remove  and add all devices from WeMo bridge
-
-     toggle --ip <ip> --port <p>
+       toggle --ip <ip> --port <p>
           Turn WeMo on or off
 
      The options above are defined as:
 
-     --ip <ip>    IP Address of device
+       --ip <ip>    IP Address of device
 
-     --password <pswd>   Password for home Wi-Fi
+       --password <pswd>   Password for home Wi-Fi
 
-     --port <p>      Port WeMo device listens on. Usually, in the range
+       --port <p>      Port WeMo device listens on. Usually, in the range
           49151..49156. 49152 and 49153 are most common
 
-     --ssid <wifi-ssid>  SSID used by 802.11n home Wi-Fi
+       --ssid <wifi-ssid>  SSID used by 802.11n home Wi-Fi
 
 ''')
     else:
@@ -352,6 +492,8 @@ if __name__ == '__main__':
         subparsers = parser.add_subparsers()
 
         # network commands
+        subparsers.add_parser('bridge').set_defaults(func = discover)
+        subparsers.add_parser('data', parents = [common]).set_defaults(func = data)
         subparsers.add_parser('discover').set_defaults(func = discover)
         subparsers.add_parser('toggle', parents = [common]).set_defaults(func = toggle)
 
@@ -373,7 +515,3 @@ if __name__ == '__main__':
         args = vars(parser.parse_args())
         cmd = args.pop('func')
         cmd(**args)
-
-
-
-
